@@ -1,7 +1,8 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Response, Cookie
+from fastapi import FastAPI, APRouter, HTTPException, Depends, Response, Cookie, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import RedirectResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
@@ -12,14 +13,20 @@ from typing import List, Optional
 import uuid
 from datetime import datetime, timezone, timedelta
 from enum import Enum
+import urllib.parse
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+# Use .get() for safer access to environment variables
+mongo_url = os.environ.get('MONGO_URL')
+db_name = os.environ.get('DB_NAME')
+if not mongo_url or not db_name:
+    raise RuntimeError("MONGO_URL and DB_NAME environment variables are required.")
+
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[db_name]
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -48,6 +55,7 @@ class User(BaseModel):
     picture: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+# ... (Todos os seus outros modelos Pydantic continuam aqui, sem alterações)
 class UserCreate(BaseModel):
     email: str
     name: str
@@ -115,15 +123,8 @@ class MonthlyReport(BaseModel):
     transactions_count: int
     top_categories: List[dict]
 
-# Helper functions
-def prepare_for_mongo(data):
-    """Prepare data for MongoDB storage"""
-    if isinstance(data, dict):
-        for key, value in data.items():
-            if isinstance(value, datetime):
-                data[key] = value.isoformat()
-    return data
 
+# Helper functions
 def parse_from_mongo(item):
     """Parse data from MongoDB"""
     if isinstance(item, dict):
@@ -131,13 +132,14 @@ def parse_from_mongo(item):
             if key.endswith('_at') or key == 'date' or key == 'deadline':
                 if isinstance(value, str):
                     try:
+                        # Handle both Z and +00:00 formats
                         item[key] = datetime.fromisoformat(value.replace('Z', '+00:00'))
-                    except:
-                        pass
+                    except ValueError:
+                        pass # Ignore if format is incorrect
     return item
 
 # Authentication functions
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), session_token: str = Cookie(None)):
+async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security), session_token: Optional[str] = Cookie(None)):
     token = None
     if session_token:
         token = session_token
@@ -147,12 +149,16 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     
-    # Find session in database
     session = await db.sessions.find_one({"session_token": token})
-    if not session or datetime.fromisoformat(session['expires_at']) < datetime.now(timezone.utc):
-        raise HTTPException(status_code=401, detail="Invalid or expired session")
     
-    # Get user
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid session token")
+
+    # It's better to parse the datetime object for comparison
+    expires_at = parse_from_mongo(session).get('expires_at')
+    if not expires_at or expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Session expired")
+    
     user = await db.users.find_one({"id": session['user_id']})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
@@ -166,43 +172,60 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 async def health_check():
     return {"message": "Financial Guardian API is running", "status": "healthy"}
 
-# Authentication
-@api_router.post("/auth/callback")
-async def auth_callback(session_id: str, response: Response):
+# --- INÍCIO DAS MUDANÇAS NA AUTENTICAÇÃO ---
+
+@api_router.get("/auth/login")
+async def auth_login(redirect_uri: str = Query(...)):
+    """
+    Inicia o fluxo de autenticação.
+    Redireciona o usuário para o serviço de autenticação externo.
+    """
+    # A URL do nosso próprio backend que irá receber o callback
+    # É importante usar a variável de ambiente para a URL do Render
+    backend_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not backend_url:
+        raise HTTPException(status_code=500, detail="RENDER_EXTERNAL_URL is not set")
+    backend_callback_url = f"{backend_url}/api/auth/callback;"
+
+    # O Emergent Agent precisa saber para onde redirecionar (nosso callback)
+    # E nós precisamos saber para onde redirecionar o usuário no final (o frontend)
+    redirect_param = f"{backend_callback_url}?final_redirect={urllib.parse.quote(redirect_uri)}"
+    
+    auth_service_url = f"https://auth.emergentagent.com/?redirect={urllib.parse.quote(redirect_param)}"
+    
+    return RedirectResponse(url=auth_service_url)
+
+
+@api_router.get("/auth/callback") # MUDANÇA: Era POST, agora é GET para receber o redirect
+async def auth_callback(session_id: str, response: Response, final_redirect: Optional[str] = Query(None)):
+    """
+    Recebe o callback do serviço de autenticação, cria o usuário/sessão
+    e redireciona de volta para o frontend.
+    """
     try:
-        # TODO: Implementar sistema de autenticação próprio
-        # Call Emergent auth API
-        # async with httpx.AsyncClient() as client:
-        #     auth_response = await client.get(
-        #         "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-        #         headers={"X-Session-ID": session_id}
-        #     )
-        #     auth_response.raise_for_status()
-        #     auth_data = auth_response.json()
+        # Chama a API do Emergent para validar o session_id e obter os dados do usuário
+        async with httpx.AsyncClient() as client:
+            auth_response = await client.get(
+                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+                headers={"X-Session-ID": session_id}
+            )
+            auth_response.raise_for_status()
+            auth_data = auth_response.json()
         
-        # Mock data for development
-        auth_data = {
-            "email": "user@example.com",
-            "name": "Usuário Exemplo",
-            "picture": None,
-            "session_token": "mock_session_token"
-        }
+        # Verifica se o usuário já existe
+        user = await db.users.find_one({"email": auth_data["email"]})
         
-        # Check if user exists
-        existing_user = await db.users.find_one({"email": auth_data["email"]})
-        
-        if not existing_user:
-            # Create new user
-            user_data = {
-                "id": str(uuid.uuid4()),
-                "email": auth_data["email"],
-                "name": auth_data["name"],
-                "picture": auth_data.get("picture"),
-                "created_at": datetime.now(timezone.utc).isoformat()
-            }
-            await db.users.insert_one(user_data)
+        if not user:
+            # Cria um novo usuário se não existir
+            new_user = User(
+                email=auth_data["email"],
+                name=auth_data["name"],
+                picture=auth_data.get("picture")
+            )
+            await db.users.insert_one(new_user.dict())
+            user_id = new_user.id
             
-            # Create default categories
+            # Cria categorias padrão para o novo usuário
             default_categories = [
                 {"name": "Alimentação", "color": "#EF4444", "icon": "🍽️", "is_default": True},
                 {"name": "Transporte", "color": "#3B82F6", "icon": "🚗", "is_default": True},
@@ -213,71 +236,71 @@ async def auth_callback(session_id: str, response: Response):
                 {"name": "Salário", "color": "#22C55E", "icon": "💰", "is_default": True},
                 {"name": "Investimentos", "color": "#6366F1", "icon": "📈", "is_default": True}
             ]
-            
             for cat_data in default_categories:
-                category = {
-                    "id": str(uuid.uuid4()),
-                    "user_id": user_data["id"],
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    **cat_data
-                }
-                await db.categories.insert_one(category)
+                category = Category(user_id=user_id, **cat_data)
+                await db.categories.insert_one(category.dict())
         else:
-            user_data = existing_user
+            user_id = user["id"]
         
-        # Create session
-        session_data = {
-            "id": str(uuid.uuid4()),
-            "user_id": user_data["id"],
-            "session_token": auth_data["session_token"],
-            "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }
-        await db.sessions.insert_one(session_data)
+        # Cria uma nova sessão para o usuário
+        session_token = auth_data.get("session_token", str(uuid.uuid4())) # Gera um token se não vier
+        new_session = Session(
+            user_id=user_id,
+            session_token=session_token,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=7)
+        )
+        await db.sessions.insert_one(new_session.dict())
         
-        # Set cookie
+        # Define o cookie no navegador do usuário
         response.set_cookie(
             key="session_token",
-            value=auth_data["session_token"],
-            max_age=7 * 24 * 60 * 60,  # 7 days
+            value=session_token,
+            max_age=7 * 24 * 60 * 60,  # 7 dias
             httponly=True,
             secure=True,
             samesite="none",
             path="/"
         )
         
-        return {"success": True, "user": User(**parse_from_mongo(user_data))}
+        # Se tivermos a URL final, redireciona para lá
+        if final_redirect:
+            return RedirectResponse(url=final_redirect)
+        
+        return {"success": True, "message": "Login successful, but no redirect URL provided."}
         
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=400, detail=f"Auth failed: {e}")
+        error_detail = e.response.json().get("detail", str(e))
+        raise HTTPException(status_code=400, detail=f"Auth failed: {error_detail}")
     except Exception as e:
+        logging.error(f"Internal error during auth callback: {e}")
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+
+# --- FIM DAS MUDANÇAS NA AUTENTICAÇÃO ---
 
 @api_router.get("/auth/me", response_model=User)
 async def get_me(current_user: User = Depends(get_current_user)):
     return current_user
 
 @api_router.post("/auth/logout")
-async def logout(response: Response, session_token: str = Cookie(None)):
+async def logout(response: Response, session_token: Optional[str] = Cookie(None)):
     if session_token:
         await db.sessions.delete_many({"session_token": session_token})
     response.delete_cookie(key="session_token", path="/")
     return {"success": True}
 
+# ... (Todas as suas outras rotas para categories, transactions, goals, etc. continuam aqui)
 # Categories
 @api_router.get("/categories", response_model=List[Category])
 async def get_categories(current_user: User = Depends(get_current_user)):
-    categories = await db.categories.find({"user_id": current_user.id}).to_list(1000)
+    categories_cursor = db.categories.find({"user_id": current_user.id})
+    categories = await categories_cursor.to_list(1000)
     return [Category(**parse_from_mongo(cat)) for cat in categories]
 
 @api_router.post("/categories", response_model=Category)
 async def create_category(category_data: CategoryCreate, current_user: User = Depends(get_current_user)):
-    category_dict = category_data.dict()
-    category_dict["user_id"] = current_user.id
-    category_obj = Category(**category_dict)
-    category_mongo = prepare_for_mongo(category_obj.dict())
-    await db.categories.insert_one(category_mongo)
-    return category_obj
+    category = Category(user_id=current_user.id, **category_data.dict())
+    await db.categories.insert_one(category.dict())
+    return category
 
 @api_router.delete("/categories/{category_id}")
 async def delete_category(category_id: str, current_user: User = Depends(get_current_user)):
@@ -289,33 +312,26 @@ async def delete_category(category_id: str, current_user: User = Depends(get_cur
 # Transactions
 @api_router.get("/transactions", response_model=List[Transaction])
 async def get_transactions(current_user: User = Depends(get_current_user)):
-    transactions = await db.transactions.find({"user_id": current_user.id}).sort("date", -1).to_list(1000)
+    transactions_cursor = db.transactions.find({"user_id": current_user.id}).sort("date", -1)
+    transactions = await transactions_cursor.to_list(1000)
     return [Transaction(**parse_from_mongo(txn)) for txn in transactions]
 
 @api_router.post("/transactions", response_model=Transaction)
 async def create_transaction(transaction_data: TransactionCreate, current_user: User = Depends(get_current_user)):
-    transaction_dict = transaction_data.dict()
-    transaction_dict["user_id"] = current_user.id
-    transaction_obj = Transaction(**transaction_dict)
-    transaction_mongo = prepare_for_mongo(transaction_obj.dict())
-    await db.transactions.insert_one(transaction_mongo)
-    return transaction_obj
+    transaction = Transaction(user_id=current_user.id, **transaction_data.dict())
+    await db.transactions.insert_one(transaction.dict())
+    return transaction
 
 @api_router.put("/transactions/{transaction_id}", response_model=Transaction)
 async def update_transaction(transaction_id: str, transaction_data: TransactionCreate, current_user: User = Depends(get_current_user)):
-    transaction_dict = transaction_data.dict()
-    transaction_dict["user_id"] = current_user.id
-    transaction_mongo = prepare_for_mongo(transaction_dict)
-    
     result = await db.transactions.update_one(
         {"id": transaction_id, "user_id": current_user.id},
-        {"$set": transaction_mongo}
+        {"$set": transaction_data.dict()}
     )
-    
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Transaction not found")
     
-    updated_transaction = await db.transactions.find_one({"id": transaction_id})
+    updated_transaction = await db.transactions.find_one({"id": transaction_id, "user_id": current_user.id})
     return Transaction(**parse_from_mongo(updated_transaction))
 
 @api_router.delete("/transactions/{transaction_id}")
@@ -328,33 +344,31 @@ async def delete_transaction(transaction_id: str, current_user: User = Depends(g
 # Goals
 @api_router.get("/goals", response_model=List[Goal])
 async def get_goals(current_user: User = Depends(get_current_user)):
-    goals = await db.goals.find({"user_id": current_user.id}).to_list(1000)
+    goals_cursor = db.goals.find({"user_id": current_user.id})
+    goals = await goals_cursor.to_list(1000)
     return [Goal(**parse_from_mongo(goal)) for goal in goals]
 
 @api_router.post("/goals", response_model=Goal)
 async def create_goal(goal_data: GoalCreate, current_user: User = Depends(get_current_user)):
-    goal_dict = goal_data.dict()
-    goal_dict["user_id"] = current_user.id
-    goal_obj = Goal(**goal_dict)
-    goal_mongo = prepare_for_mongo(goal_obj.dict())
-    await db.goals.insert_one(goal_mongo)
-    return goal_obj
+    goal = Goal(user_id=current_user.id, **goal_data.dict())
+    await db.goals.insert_one(goal.dict())
+    return goal
 
-@api_router.put("/goals/{goal_id}/add-amount")
-async def add_to_goal(goal_id: str, amount: float, current_user: User = Depends(get_current_user)):
+@api_router.put("/goals/{goal_id}/add-amount", response_model=Goal)
+async def add_to_goal(goal_id: str, amount: float = Query(..., gt=0), current_user: User = Depends(get_current_user)):
     goal = await db.goals.find_one({"id": goal_id, "user_id": current_user.id})
     if not goal:
         raise HTTPException(status_code=404, detail="Goal not found")
     
     new_amount = goal.get("current_amount", 0) + amount
-    status = GoalStatus.COMPLETED if new_amount >= goal["target_amount"] else GoalStatus.ACTIVE
+    status = GoalStatus.COMPLETED if new_amount >= goal["target_amount"] else goal["status"]
     
     await db.goals.update_one(
         {"id": goal_id, "user_id": current_user.id},
         {"$set": {"current_amount": new_amount, "status": status}}
     )
     
-    updated_goal = await db.goals.find_one({"id": goal_id})
+    updated_goal = await db.goals.find_one({"id": goal_id, "user_id": current_user.id})
     return Goal(**parse_from_mongo(updated_goal))
 
 @api_router.delete("/goals/{goal_id}")
@@ -367,42 +381,35 @@ async def delete_goal(goal_id: str, current_user: User = Depends(get_current_use
 # Reports
 @api_router.get("/reports/monthly/{year}/{month}", response_model=MonthlyReport)
 async def get_monthly_report(year: int, month: int, current_user: User = Depends(get_current_user)):
-    # Date range for the month
-    start_date = datetime(year, month, 1)
+    start_date = datetime(year, month, 1, tzinfo=timezone.utc)
     if month == 12:
-        end_date = datetime(year + 1, 1, 1)
+        end_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
     else:
-        end_date = datetime(year, month + 1, 1)
+        end_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
     
-    # Get transactions for the month
-    transactions = await db.transactions.find({
+    transactions_cursor = db.transactions.find({
         "user_id": current_user.id,
-        "date": {
-            "$gte": start_date.isoformat(),
-            "$lt": end_date.isoformat()
-        }
-    }).to_list(1000)
+        "date": {"$gte": start_date, "$lt": end_date}
+    })
+    transactions = await transactions_cursor.to_list(1000)
     
-    # Calculate totals
-    total_income = sum(t["amount"] for t in transactions if t["type"] == "income")
-    total_expenses = sum(t["amount"] for t in transactions if t["type"] == "expense")
+    total_income = sum(t["amount"] for t in transactions if t["type"] == TransactionType.INCOME)
+    total_expenses = sum(t["amount"] for t in transactions if t["type"] == TransactionType.EXPENSE)
     
-    # Get categories
-    categories = await db.categories.find({"user_id": current_user.id}).to_list(1000)
+    categories_cursor = db.categories.find({"user_id": current_user.id})
+    categories = await categories_cursor.to_list(1000)
     cat_dict = {cat["id"]: cat for cat in categories}
     
-    # Top categories
     category_totals = {}
     for txn in transactions:
-        if txn["type"] == "expense":
+        if txn["type"] == TransactionType.EXPENSE:
             cat_id = txn["category_id"]
-            if cat_id in category_totals:
-                category_totals[cat_id] += txn["amount"]
-            else:
-                category_totals[cat_id] = txn["amount"]
+            category_totals[cat_id] = category_totals.get(cat_id, 0) + txn["amount"]
+    
+    top_categories_sorted = sorted(category_totals.items(), key=lambda item: item[1], reverse=True)[:5]
     
     top_categories = []
-    for cat_id, amount in sorted(category_totals.items(), key=lambda x: x[1], reverse=True)[:5]:
+    for cat_id, amount in top_categories_sorted:
         if cat_id in cat_dict:
             top_categories.append({
                 "category": cat_dict[cat_id]["name"],
@@ -422,24 +429,30 @@ async def get_monthly_report(year: int, month: int, current_user: User = Depends
 
 # Include the router in the main app
 app.include_router(api_router)
+
+# CORS Middleware Configuration
 origins = [
     "https://financas-eight-alpha.vercel.app",
+    # Você pode adicionar a URL de desenvolvimento local aqui também
+    # "http://localhost:3000",
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+@app.on_event("startup")
+async def startup_event():
+    logging.info("Application startup")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+    logging.info("MongoDB connection closed")
