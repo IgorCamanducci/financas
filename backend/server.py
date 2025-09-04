@@ -170,14 +170,23 @@ async def health_check():
 @api_router.post("/auth/callback")
 async def auth_callback(session_id: str, response: Response):
     try:
+        # TODO: Implementar sistema de autenticação próprio
         # Call Emergent auth API
-        async with httpx.AsyncClient() as client:
-            auth_response = await client.get(
-                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-                headers={"X-Session-ID": session_id}
-            )
-            auth_response.raise_for_status()
-            auth_data = auth_response.json()
+        # async with httpx.AsyncClient() as client:
+        #     auth_response = await client.get(
+        #         "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+        #         headers={"X-Session-ID": session_id}
+        #     )
+        #     auth_response.raise_for_status()
+        #     auth_data = auth_response.json()
+        
+        # Mock data for development
+        auth_data = {
+            "email": "user@example.com",
+            "name": "Usuário Exemplo",
+            "picture": None,
+            "session_token": "mock_session_token"
+        }
         
         # Check if user exists
         existing_user = await db.users.find_one({"email": auth_data["email"]})
@@ -413,15 +422,17 @@ async def get_monthly_report(year: int, month: int, current_user: User = Depends
 
 # Include the router in the main app
 app.include_router(api_router)
+origins = [
+    "https://financas-eight-alpha.vercel.app",
+]
 
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=origins,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
