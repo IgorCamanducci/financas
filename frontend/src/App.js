@@ -1225,10 +1225,10 @@ const LoginPage = () => {
   const handleLogin = () => {
     const currentUrl = window.location.origin;
     const authUrl = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(currentUrl + '/profile')}`;
-    window.location.href = '/dashboard'; // Exemplo de redirecionamento
+    //window.location.href = '/dashboard'; // Exemplo de redirecionamento
     // TODO: Implementar sistema de autenticação próprio ou usar outro provedor
     // const authUrl = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(currentUrl + '/profile')}`;
-    // window.location.href = authUrl;
+    window.location.href = authUrl;
     //alert('Sistema de autenticação em desenvolvimento');
   };
 
