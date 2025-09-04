@@ -102,7 +102,7 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Crie um aplicativo de controle financeiro completo com despesas mensais, categorização de transações, relatórios e gráficos mensais, metas financeiras e investimentos, login social com Google (Emergent Authentication), interface moderna e simples. Integração bancária opcional (C6, Itau, Bradesco)."
+user_problem_statement: "Crie um aplicativo de controle financeiro completo com despesas mensais, categorização de transações, relatórios e gráficos mensais, metas financeiras e investimentos, login social com Google, interface moderna e simples. Integração bancária opcional (C6, Itau, Bradesco)."
 
 backend:
   - task: "Health Check Endpoint"
@@ -117,7 +117,7 @@ backend:
         agent: "main"
         comment: "Added and tested basic health check endpoint GET /api/ - returns 200 with status message."
 
-  - task: "Emergent Authentication Integration"
+  - task: "Sistema de Autenticação"
     implemented: true
     working: true
     file: "/app/backend/server.py"
@@ -200,7 +200,7 @@ frontend:
     status_history:
       - working: true
         agent: "main"
-        comment: "Login page loads correctly with modern design. Google authentication redirects properly to auth.emergentagent.com with correct parameters."
+        comment: "Login page loads correctly with modern design. Sistema de autenticação em desenvolvimento."
 
   - task: "Dashboard with Charts"
     implemented: true
@@ -282,7 +282,7 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Emergent Authentication Integration"
+    - "Sistema de Autenticação"
     - "User Management System"
     - "Categories CRUD Operations"
     - "Transactions Management"

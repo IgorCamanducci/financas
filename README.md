@@ -50,7 +50,7 @@ pytest -q
 ```
 
 ## Notas de Autenticação
-- O backend espera um fluxo de autenticação via Emergent (rota `/api/auth/callback`).
+- O backend possui um sistema de autenticação em desenvolvimento.
 - Para desenvolvimento, considere adicionar uma rota de "dev login" que crie um usuário e sessão locais.
 
 ## Scripts úteis
